@@ -1,0 +1,395 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seeds
+np.random.seed(42)
+tf.random.set_seed(42)
+
+print("Minimal Stock Price Prediction System")
+print("=" * 50)
+
+class MinimalStockPredictor:
+    def __init__(self, symbol='AAPL', lookback_window=60):
+        self.symbol = symbol
+        self.lookback_window = lookback_window
+        self.scaler = MinMaxScaler()
+        self.model = None
+        self.data = None
+        
+    def generate_stock_data(self, days=500):
+        """Generate realistic synthetic stock data"""
+        print(f" Generating synthetic data for {self.symbol}...")
+        
+        dates = pd.date_range(end=pd.Timestamp.now(), periods=days, freq='D')
+        
+        # Generate realistic price movement
+        price = 100  # Starting price
+        prices = []
+        volumes = []
+        
+        for i in range(days):
+            # Market factors
+            trend = 0.0003  # Slight upward trend
+            seasonality = 0.005 * np.sin(2 * np.pi * i / 252)  # Annual cycle
+            volatility = np.random.normal(0, 0.015)  # Daily volatility
+            momentum = 0.7 * volatility  # Momentum effect
+            
+            # Price calculation
+            daily_return = trend + seasonality + volatility + momentum
+            price = max(10, price * (1 + daily_return))
+            prices.append(price)
+            
+            # Volume (higher on volatile days)
+            base_volume = 1000000
+            vol_multiplier = 1 + abs(volatility) * 10
+            volume = int(base_volume * vol_multiplier * (0.5 + np.random.random()))
+            volumes.append(volume)
+        
+        # Create DataFrame
+        df = pd.DataFrame({
+            'date': dates,
+            'close': prices,
+            'volume': volumes
+        })
+        
+        # Generate OHLC
+        df['open'] = df['close'].shift(1) * (1 + np.random.normal(0, 0.002, len(df)))
+        df['high'] = df[['open', 'close']].max(axis=1) * (1 + np.random.uniform(0, 0.01, len(df)))
+        df['low'] = df[['open', 'close']].min(axis=1) * (1 - np.random.uniform(0, 0.01, len(df)))
+        
+        df = df.fillna(method='bfill')
+        
+        print(f"Generated {days} days of data")
+        return df
+    
+    def add_technical_indicators(self, df):
+        """Add essential technical indicators"""
+        data = df.copy()
+        
+        # Moving averages
+        data['sma_10'] = data['close'].rolling(10).mean()
+        data['sma_20'] = data['close'].rolling(20).mean()
+        data['sma_50'] = data['close'].rolling(50).mean()
+        
+        # Price-based features
+        data['returns'] = data['close'].pct_change()
+        data['volatility'] = data['returns'].rolling(20).std()
+        data['high_low_pct'] = (data['high'] - data['low']) / data['close']
+        
+        # RSI (simplified)
+        delta = data['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        data['rsi'] = 100 - (100 / (1 + rs))
+        
+        # Volume features
+        data['volume_sma'] = data['volume'].rolling(20).mean()
+        data['volume_ratio'] = data['volume'] / data['volume_sma']
+        
+        return data.dropna()
+    
+    def prepare_data(self):
+        """Generate and prepare data for training"""
+        # Generate data
+        df = self.generate_stock_data()
+        df = self.add_technical_indicators(df)
+        
+        # Select features
+        feature_cols = ['close', 'volume', 'sma_10', 'sma_20', 'sma_50', 
+                       'returns', 'volatility', 'high_low_pct', 'rsi', 'volume_ratio']
+        
+        # Prepare feature matrix
+        features = df[feature_cols].values
+        target = df['close'].values
+        
+        # Scale features
+        features_scaled = self.scaler.fit_transform(features)
+        
+        # Create sequences
+        X, y = self.create_sequences(features_scaled, target)
+        
+        # Store data
+        self.data = df
+        self.feature_cols = feature_cols
+        
+        return X, y
+    
+    def create_sequences(self, features, target):
+        """Create sequences for time series prediction"""
+        X, y = [], []
+        
+        for i in range(self.lookback_window, len(features)):
+            X.append(features[i-self.lookback_window:i])
+            y.append(target[i])
+        
+        return np.array(X), np.array(y)
+    
+    def build_model(self, input_shape, model_type='lstm'):
+        """Build neural network model"""
+        model = Sequential()
+        
+        if model_type == 'lstm':
+            model.add(LSTM(50, return_sequences=True, input_shape=input_shape))
+            model.add(Dropout(0.2))
+            model.add(LSTM(50, return_sequences=False))
+            model.add(Dropout(0.2))
+            model.add(Dense(25, activation='relu'))
+            model.add(Dense(1))
+            
+        elif model_type == 'cnn':
+            model.add(Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape))
+            model.add(MaxPooling1D(pool_size=2))
+            model.add(Conv1D(filters=32, kernel_size=3, activation='relu'))
+            model.add(Flatten())
+            model.add(Dense(50, activation='relu'))
+            model.add(Dropout(0.2))
+            model.add(Dense(1))
+        
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+        return model
+    
+    def train(self, model_type='lstm', epochs=50, test_size=0.2):
+        """Train the model"""
+        print(f" Training {model_type.upper()} model...")
+        
+        # Prepare data
+        X, y = self.prepare_data()
+        
+        # Train-test split
+        split_idx = int(len(X) * (1 - test_size))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        
+        print(f" Training data: {X_train.shape}, Test data: {X_test.shape}")
+        
+        # Build and train model
+        input_shape = (X_train.shape[1], X_train.shape[2])
+        self.model = self.build_model(input_shape, model_type)
+        
+        # Training
+        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        
+        history = self.model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=32,
+            validation_data=(X_test, y_test),
+            callbacks=[early_stop],
+            verbose=1
+        )
+        
+        # Evaluate
+        train_pred = self.model.predict(X_train, verbose=0)
+        test_pred = self.model.predict(X_test, verbose=0)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        test_rmse = np.sqrt(mean_squared_error(y_test, test_pred))
+        train_r2 = r2_score(y_train, train_pred)
+        test_r2 = r2_score(y_test, test_pred)
+        
+        print(f"\n Results:")
+        print(f"   Train RMSE: ${train_rmse:.2f}")
+        print(f"   Test RMSE: ${test_rmse:.2f}")
+        print(f"   Train R²: {train_r2:.4f}")
+        print(f"   Test R²: {test_r2:.4f}")
+        
+        # Store results
+        self.X_test = X_test
+        self.y_test = y_test
+        self.test_pred = test_pred
+        self.history = history
+        
+        return history
+    
+    def predict_future(self, days=30):
+        """Predict future prices"""
+        if self.model is None:
+            raise ValueError("Model not trained yet!")
+        
+        print(f" Predicting next {days} days...")
+        
+        # Get last sequence
+        last_sequence = self.X_test[-1].reshape(1, self.X_test.shape[1], self.X_test.shape[2])
+        predictions = []
+        current_price = self.y_test[-1]
+        
+        for day in range(days):
+            # Predict next price
+            next_pred = self.model.predict(last_sequence, verbose=0)[0, 0]
+            predictions.append(next_pred)
+            
+            # Update sequence (simplified approach)
+            # In practice, you'd update with actual features
+            new_features = last_sequence[0, -1, :].copy()
+            new_features[0] = next_pred  # Update close price
+            
+            # Reshape and update sequence
+            new_row = new_features.reshape(1, 1, -1)
+            last_sequence = np.concatenate([last_sequence[:, 1:, :], new_row], axis=1)
+        
+        # Create predictions DataFrame
+        future_dates = pd.date_range(
+            start=self.data['date'].iloc[-1] + pd.Timedelta(days=1), 
+            periods=days, 
+            freq='D'
+        )
+        
+        pred_df = pd.DataFrame({
+            'date': future_dates,
+            'predicted_price': predictions
+        })
+        
+        return pred_df
+    
+    def plot_results(self, predictions=None):
+        """Create visualizations"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'Stock Analysis Results for {self.symbol}', fontsize=14, fontweight='bold')
+        
+        # 1. Training History
+        if hasattr(self, 'history'):
+            axes[0, 0].plot(self.history.history['loss'], label='Training Loss')
+            axes[0, 0].plot(self.history.history['val_loss'], label='Validation Loss')
+            axes[0, 0].set_title('Training History')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. Actual vs Predicted
+        if hasattr(self, 'test_pred'):
+            axes[0, 1].scatter(self.y_test, self.test_pred, alpha=0.6)
+            min_val, max_val = min(self.y_test.min(), self.test_pred.min()), max(self.y_test.max(), self.test_pred.max())
+            axes[0, 1].plot([min_val, max_val], [min_val, max_val], 'r--')
+            axes[0, 1].set_title('Actual vs Predicted')
+            axes[0, 1].set_xlabel('Actual Price ($)')
+            axes[0, 1].set_ylabel('Predicted Price ($)')
+            axes[0, 1].grid(True, alpha=0.3)
+        
+        # 3. Price Chart
+        recent_data = self.data.tail(100)
+        axes[1, 0].plot(recent_data['date'], recent_data['close'], label='Close Price', linewidth=2)
+        axes[1, 0].plot(recent_data['date'], recent_data['sma_20'], label='SMA 20', alpha=0.7)
+        axes[1, 0].set_title('Price Chart')
+        axes[1, 0].set_xlabel('Date')
+        axes[1, 0].set_ylabel('Price ($)')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].tick_params(axis='x', rotation=45)
+        
+        # 4. Predictions
+        if predictions is not None:
+            # Plot recent prices
+            recent = self.data.tail(30)
+            axes[1, 1].plot(recent['date'], recent['close'], label='Historical', linewidth=2)
+            
+            # Plot predictions
+            axes[1, 1].plot(predictions['date'], predictions['predicted_price'], 
+                           label='Predictions', linestyle='--', linewidth=2)
+            
+            axes[1, 1].set_title('Future Predictions')
+            axes[1, 1].set_xlabel('Date')
+            axes[1, 1].set_ylabel('Price ($)')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def generate_report(self, predictions=None):
+        """Generate analysis report"""
+        current_price = self.data['close'].iloc[-1]
+        
+        print("\n" + "="*60)
+        print(f" STOCK ANALYSIS REPORT - {self.symbol}")
+        print("="*60)
+        print(f" Current Price: ${current_price:.2f}")
+        
+        if predictions is not None:
+            next_day = predictions['predicted_price'].iloc[0]
+            one_week = predictions['predicted_price'].iloc[6] if len(predictions) > 6 else predictions['predicted_price'].iloc[-1]
+            
+            print(f" Next Day Prediction: ${next_day:.2f}")
+            print(f" 1-Week Target: ${one_week:.2f}")
+            
+            change_1d = ((next_day - current_price) / current_price) * 100
+            change_1w = ((one_week - current_price) / current_price) * 100
+            
+            print(f" Expected 1-Day Change: {change_1d:+.2f}%")
+            print(f" Expected 1-Week Change: {change_1w:+.2f}%")
+        
+        # Technical indicators
+        latest = self.data.iloc[-1]
+        print(f"\n Technical Indicators:")
+        print(f"   RSI: {latest['rsi']:.1f}")
+        print(f"   Price vs SMA20: {((current_price / latest['sma_20']) - 1) * 100:+.1f}%")
+        print(f"   Volatility: {latest['volatility'] * 100:.2f}%")
+        
+        print("="*60)
+        print("  Educational purposes only - Not financial advice")
+
+def demo_run():
+    """Run a complete demonstration"""
+    print(" Starting Stock Prediction Demo")
+    print("=" * 40)
+    
+    # Test multiple stocks and models
+    stocks = ['AAPL', 'GOOGL', 'TSLA']
+    models = ['lstm', 'cnn']
+    
+    for stock in stocks[:1]:  # Test one stock for demo
+        print(f"\n Analyzing {stock}...")
+        
+        predictor = MinimalStockPredictor(stock)
+        
+        # Test different models
+        best_r2 = 0
+        best_model = 'lstm'
+        
+        for model in models:
+            print(f"\n Testing {model.upper()} model...")
+            try:
+                predictor.train(model_type=model, epochs=30)
+                
+                # Simple evaluation
+                test_r2 = r2_score(predictor.y_test, predictor.test_pred)
+                if test_r2 > best_r2:
+                    best_r2 = test_r2
+                    best_model = model
+                    
+            except Exception as e:
+                print(f" Error with {model}: {e}")
+        
+        print(f"\n Best model: {best_model.upper()} (R² = {best_r2:.4f})")
+        
+        # Final training with best model
+        predictor.train(model_type=best_model, epochs=50)
+        
+        # Generate predictions
+        predictions = predictor.predict_future(days=30)
+        
+        # Show results
+        predictor.plot_results(predictions)
+        predictor.generate_report(predictions)
+
+if __name__ == "__main__":
+    print()
+    
+    try:
+        demo_run()
+    except Exception as e:
+        print(f" Error: {e}")
+        

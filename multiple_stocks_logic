@@ -1,0 +1,41 @@
+# Test multiple stocks and models
+    stocks = ['Apple', 'Google', 'Tesla']
+    models = ['lstm', 'cnn']
+    
+    for stock in stocks[:1]:  # Test one stock for demo
+        print(f"\n Analyzing {stock}...")
+        
+        predictor = MinimalStockPredictor(stock)
+        
+        # Test different models
+        best_r2 = 0
+        best_model = 'lstm'
+        
+        for model in models:
+            print(f"\n Testing {model.upper()} model...")
+            try:
+                predictor.train(model_type=model, epochs=30)
+                
+                # Simple evaluation
+                test_r2 = r2_score(predictor.y_test, predictor.test_pred)
+                if test_r2 > best_r2:
+                    best_r2 = test_r2
+                    best_model = model
+                    
+            except Exception as e:
+                print(f" Error with {model}: {e}")
+        
+        print(f"\n Best model: {best_model.upper()} (R² = {best_r2:.4f})")
+        
+        # Final training with best model
+        predictor.train(model_type=best_model, epochs=50)
+        
+        # Generate predictions
+        predictions = predictor.predict_future(days=30)
+        
+        # Show results
+        predictor.plot_results(predictions)
+        predictor.generate_report(predictions)
+
+if __name__ == "__main__":
+    print()
